@@ -1,0 +1,574 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <!-- 手机适配必须的 viewport 设置 -->
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, shrink-to-fit=no, viewport-fit=cover" />
+  <title>五子棋 · 联机 & 人机</title>
+  <!-- Socket.IO 客户端库 -->
+  <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+  <style>
+    :root { --bg:#f6f7fb; --panel:#fff; --text:#1f2937; --muted:#6b7280; --accent:#3b82f6; --online:#10b981; }
+    *{box-sizing:border-box}
+    body{margin:0;padding:24px;background:var(--bg);color:var(--text);font:16px/1.5 system-ui,-apple-system,Segoe UI,Roboto,Noto Sans,Helvetica,Arial;display:grid;place-items:center}
+    .card{background:var(--panel);border-radius:16px;padding:20px;box-shadow:0 10px 30px rgba(0,0,0,.08);width:min(92vw,820px)}
+    h1{font-size:20px;margin:0 0 12px;display:flex;gap:8px;align-items:center}
+    .sub{color:var(--muted);margin-bottom:16px}
+    .board-wrap{position:relative;user-select:none;touch-action:none}
+    canvas{display:block;width:100%;height:auto;background:#f3f4f6;border-radius:12px;touch-action:none}
+    .toolbar{display:flex;gap:10px;margin-top:14px;flex-wrap:wrap;align-items:center}
+    button{border:none;background:var(--accent);color:#fff;padding:10px 14px;border-radius:999px;cursor:pointer;font-weight:600;box-shadow:0 4px 12px rgba(59,130,246,.3);min-height:44px;font-size:16px}
+    button.ghost{background:transparent;color:var(--text);border:1px solid #e5e7eb;box-shadow:none}
+    button.online{background:var(--online);box-shadow:0 4px 12px rgba(16,185,129,.3)}
+    .status{margin-left:auto;color:var(--muted);font-weight:600}
+    select, label.opt, .room-panel input{border:1px solid #e5e7eb;border-radius:999px;padding:8px 12px;background:#fff;font-size:16px;min-height:44px}
+    .room-panel{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:8px}
+    .room-panel input{flex:1;min-width:120px}
+    .badge{background:#e5e7eb;padding:4px 10px;border-radius:999px;font-size:14px}
+    @media (max-width:480px){body{padding:12px}.card{padding:14px}.toolbar{justify-content:space-between}}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>五子棋 · 双模式 <span class="badge" id="modeBadge">🤖 人机</span></h1>
+    <div class="sub">黑先，连五即胜。可切换人机/联机，支持手机触摸。</div>
+
+    <div class="board-wrap">
+      <canvas id="board" aria-label="Gomoku board" role="img"></canvas>
+    </div>
+
+    <!-- 联机操作区（默认隐藏） -->
+    <div class="room-panel" id="roomPanel" style="display:none">
+      <input type="text" id="roomIdInput" placeholder="房间号 (6位)" maxlength="10" />
+      <button id="createRoomBtn" class="online">创建房间</button>
+      <button id="joinRoomBtn" class="online">加入房间</button>
+      <button id="leaveRoomBtn" class="ghost" style="display:none">离开</button>
+      <span id="roomInfo" style="font-size:14px;color:var(--muted)"></span>
+    </div>
+
+    <div class="toolbar">
+      <button id="restart">重新开始</button>
+      <button id="undo" class="ghost">悔棋</button>
+      <label class="opt" style="display:flex;align-items:center;gap:8px;">
+        <input type="checkbox" id="showCoords" checked /> 显示坐标
+      </label>
+      <label class="opt" style="display:flex;align-items:center;gap:8px;">
+        <input type="checkbox" id="onlineMode" /> 联机对战
+      </label>
+      <!-- 人机选项仅在非联机时显示 -->
+      <div id="aiOptions" style="display:flex;gap:8px;align-items:center;">
+        <label class="opt" style="display:flex;align-items:center;gap:8px;">
+          <input type="checkbox" id="aiEnabled" /> 人机
+        </label>
+        <label class="opt" style="display:flex;align-items:center;gap:8px;">
+          AI 执棋：
+          <select id="aiColorSel">
+            <option value="2">白方</option>
+            <option value="1">黑方</option>
+          </select>
+        </label>
+      </div>
+      <div class="status" id="status">当前：● 黑方</div>
+    </div>
+  </div>
+
+<script>
+(function(){
+  "use strict";
+
+  // ---------- 配置 ----------
+  const SIZE = 15;
+  const CELL = 40;
+  const PADDING = 28;
+  const STAR_POINTS = [ [3,3],[3,11],[7,7],[11,3],[11,11] ];
+
+  // 联机服务器地址（部署后替换为你的服务器地址）
+  const SERVER_URL = 'https://wuziqi-gomoku-online.onrender.com';  // 本地测试用，上线后改为 https://你的域名
+
+  const canvas = document.getElementById('board');
+  const ctx = canvas.getContext('2d');
+  const statusEl = document.getElementById('status');
+  const undoBtn = document.getElementById('undo');
+  const restartBtn = document.getElementById('restart');
+  const showCoordsEl = document.getElementById('showCoords');
+  const aiEnabledEl = document.getElementById('aiEnabled');
+  const aiColorSel = document.getElementById('aiColorSel');
+  const onlineModeEl = document.getElementById('onlineMode');
+  const roomPanel = document.getElementById('roomPanel');
+  const roomIdInput = document.getElementById('roomIdInput');
+  const createRoomBtn = document.getElementById('createRoomBtn');
+  const joinRoomBtn = document.getElementById('joinRoomBtn');
+  const leaveRoomBtn = document.getElementById('leaveRoomBtn');
+  const roomInfo = document.getElementById('roomInfo');
+  const aiOptionsDiv = document.getElementById('aiOptions');
+  const modeBadge = document.getElementById('modeBadge');
+
+  // Socket 实例
+  let socket = null;
+  let myColor = null;          // 'black' 或 'white'
+  let currentRoom = null;
+  let isMyTurn = false;
+  let onlineGameStarted = false;
+  let opponentLeft = false;
+
+  const dpr = Math.max(1, Math.floor(window.devicePixelRatio || 1));
+  const logicalSize = PADDING*2 + CELL*(SIZE-1);
+  canvas.width = logicalSize * dpr;
+  canvas.height = logicalSize * dpr;
+  canvas.style.aspectRatio = '1 / 1';
+
+  let board = create2D(SIZE, SIZE, 0);
+  let turn = 1;            // 1 黑, 2 白
+  let gameOver = false;
+  const history = [];
+  let hover = null;
+  let lastMove = null;
+  let aiThinking = false;
+
+  // ---------- 辅助函数 ----------
+  function create2D(w,h,val){ return Array.from({length:h},()=>Array(w).fill(val)); }
+  function inside(x,y){ return x>=0 && y>=0 && x<SIZE && y<SIZE; }
+  function toPx(n){ return PADDING + n*CELL; }
+
+  // ---------- 绘图 ----------
+  function drawBoard(){
+    ctx.save(); ctx.scale(dpr, dpr); ctx.clearRect(0,0,canvas.width,canvas.height);
+    ctx.fillStyle = '#f9fafb'; ctx.fillRect(0,0,logicalSize,logicalSize);
+    ctx.strokeStyle = '#9ca3af'; ctx.lineWidth = 1; ctx.beginPath();
+    for(let i=0;i<SIZE;i++){
+      const p = toPx(i);
+      ctx.moveTo(toPx(0), p); ctx.lineTo(toPx(SIZE-1), p);
+      ctx.moveTo(p, toPx(0)); ctx.lineTo(p, toPx(SIZE-1));
+    } ctx.stroke();
+    ctx.fillStyle = '#6b7280';
+    STAR_POINTS.forEach(([x,y])=>{ ctx.beginPath(); ctx.arc(toPx(x), toPx(y), 3, 0, Math.PI*2); ctx.fill(); });
+    if (showCoordsEl.checked){
+      ctx.fillStyle = '#6b7280'; ctx.font = '12px system-ui'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      const letters = 'ABCDEFGHIJKLMNO'.split('');
+      for(let i=0;i<SIZE;i++){ ctx.fillText(letters[i], toPx(i), toPx(-0.9)); ctx.fillText(String(i+1), toPx(-0.9), toPx(i)); }
+    }
+    for(let y=0;y<SIZE;y++) for(let x=0;x<SIZE;x++){ const c = board[y][x]; if (c) drawStone(x,y,c); }
+    if (lastMove){ ctx.strokeStyle = '#10b981'; ctx.lineWidth = 2; ctx.strokeRect(toPx(lastMove.x)-CELL/2+2, toPx(lastMove.y)-CELL/2+2, CELL-4, CELL-4); }
+    // hover 预览 (仅当可以落子时显示)
+    if (hover && inside(hover.x, hover.y) && !gameOver && board[hover.y][hover.x] === 0){
+      const canMove = (!onlineModeEl.checked) || (onlineGameStarted && isMyTurn && turn === (myColor==='black'?1:2));
+      if (canMove) drawStone(hover.x, hover.y, turn, 0.35);
+    }
+    ctx.restore();
+  }
+
+  function drawStone(x,y,color, alpha=1){
+    const cx = toPx(x), cy = toPx(y); const r = CELL*0.42;
+    const grad = ctx.createRadialGradient(cx - r*0.3, cy - r*0.3, r*0.1, cx, cy, r);
+    if (color === 1){ grad.addColorStop(0, `rgba(66,66,66,${alpha})`); grad.addColorStop(1, `rgba(10,10,10,${alpha})`); }
+    else { grad.addColorStop(0, `rgba(255,255,255,${alpha})`); grad.addColorStop(1, `rgba(220,220,220,${alpha})`); }
+    ctx.beginPath(); ctx.fillStyle = grad; ctx.arc(cx, cy, r, 0, Math.PI*2); ctx.fill();
+    ctx.strokeStyle = color === 1 ? `rgba(0,0,0,${alpha})` : `rgba(120,120,120,${alpha})`; ctx.lineWidth = 1; ctx.stroke();
+  }
+
+  function setStatus(text){ statusEl.textContent = text; }
+  function updateStatus(){
+    if (gameOver) return;
+    if (onlineModeEl.checked){
+      if (!onlineGameStarted) setStatus('等待对手加入...');
+      else if (opponentLeft) setStatus('对手已离开');
+      else setStatus(`${turn===1?'● 黑方':'○ 白方'} ${isMyTurn?'(你的回合)':'(对方回合)'}`);
+    } else {
+      setStatus(`当前：${turn===1?'● 黑方':'○ 白方'}`);
+    }
+  }
+
+  // ---------- 游戏核心逻辑 ----------
+  function checkWin(x,y,color){
+    const dirs = [ [1,0],[0,1],[1,1],[1,-1] ];
+    for (const [dx,dy] of dirs){
+      let count = 1, i = 1;
+      while (inside(x+i*dx,y+i*dy) && board[y+i*dy][x+i*dx]===color){ count++; i++; }
+      i = 1;
+      while (inside(x-i*dx,y-i*dy) && board[y-i*dy][x-i*dx]===color){ count++; i++; }
+      if (count>=5) return true;
+    }
+    return false;
+  }
+
+  // 真正的落子动作（不包含回合切换的权限检查）
+  function placeStone(x, y, colorValue) {
+    if (!inside(x,y) || board[y][x] !== 0) return false;
+    board[y][x] = colorValue;
+    history.push({x, y, color: colorValue});
+    lastMove = {x, y};
+    const win = checkWin(x, y, colorValue);
+    if (win) {
+      gameOver = true;
+      const winnerName = colorValue===1?'● 黑方':'○ 白方';
+      setStatus(`${winnerName} 获胜！`);
+    } else if (history.length === SIZE*SIZE) {
+      gameOver = true;
+      setStatus('平局');
+    } else {
+      turn = 3 - turn;
+    }
+    drawBoard();
+    return true;
+  }
+
+  // 处理落子请求（联机模式会检查权限）
+  function handlePlace(x, y) {
+    if (gameOver || !inside(x,y) || board[y][x] !== 0) return false;
+
+    if (onlineModeEl.checked) {
+      // 联机模式
+      if (!onlineGameStarted || opponentLeft) {
+        alert('游戏未开始或对手已离开');
+        return false;
+      }
+      if (!isMyTurn) {
+        alert('还没轮到你');
+        return false;
+      }
+      const expectedColor = myColor === 'black' ? 1 : 2;
+      if (turn !== expectedColor) return false; // 安全校验
+
+      // 本地乐观更新
+      placeStone(x, y, expectedColor);
+      isMyTurn = false;
+      updateStatus();
+
+      // 发送给服务器
+      socket.emit('make-move', {
+        roomId: currentRoom,
+        row: y,    // 注意：服务器端用 row/col 对应 y/x
+        col: x,
+        color: myColor
+      });
+      return true;
+    } else {
+      // 人机/单机模式
+      const placed = placeStone(x, y, turn);
+      if (placed) {
+        updateStatus();
+        if (!gameOver && aiEnabledEl.checked) maybeAIMove();
+      }
+      return placed;
+    }
+  }
+
+  function undo(){
+    if (onlineModeEl.checked) {
+      alert('联机模式下不支持悔棋');
+      return;
+    }
+    if (history.length === 0) return;
+    const last = history.pop();
+    board[last.y][last.x] = 0;
+    lastMove = history[history.length-1] || null;
+    gameOver = false;
+    turn = last.color;
+    updateStatus();
+    drawBoard();
+    aiThinking = false;
+  }
+
+  function restart(){
+    board = create2D(SIZE, SIZE, 0);
+    turn = 1;
+    gameOver = false;
+    hover = null;
+    lastMove = null;
+    history.length = 0;
+    aiThinking = false;
+    opponentLeft = false;
+
+    if (onlineModeEl.checked) {
+      if (currentRoom) {
+        // 联机模式重置需要双方同意，简单起见这里改为直接发送请求
+        socket.emit('request-restart', { roomId: currentRoom });
+      } else {
+        updateStatus();
+        drawBoard();
+      }
+    } else {
+      updateStatus();
+      drawBoard();
+      if (aiEnabledEl.checked) maybeAIMove();
+    }
+  }
+
+  // ---------- 事件坐标转换（兼容触摸） ----------
+  function eventToCell(e){
+    e.preventDefault(); // 防止滚动
+    const rect = canvas.getBoundingClientRect();
+    let clientX, clientY;
+    if (e.touches) {
+      clientX = e.touches[0].clientX;
+      clientY = e.touches[0].clientY;
+    } else {
+      clientX = e.clientX;
+      clientY = e.clientY;
+    }
+    const px = clientX - rect.left;
+    const py = clientY - rect.top;
+    const scaleX = canvas.width / rect.width;   // 逻辑像素与 CSS 比例
+    const scaleY = canvas.height / rect.height;
+    const lx = px * scaleX / dpr;
+    const ly = py * scaleY / dpr;
+    const x = Math.round((lx - PADDING) / CELL);
+    const y = Math.round((ly - PADDING) / CELL);
+    if (!inside(x,y)) return null;
+    return {x, y};
+  }
+
+  // ---------- AI 部分 (保留) ----------
+  function aiColor(){ return Number(aiColorSel.value); }
+  function isAIEnabled(){ return aiEnabledEl.checked && !onlineModeEl.checked; }
+
+  function maybeAIMove(){
+    if (!isAIEnabled() || gameOver || aiThinking) return;
+    if (turn !== aiColor()) return;
+    aiThinking = true;
+    setTimeout(()=>{
+      const move = computeAIMove(aiColor());
+      aiThinking = false;
+      if (move && !gameOver) {
+        const placed = placeStone(move.x, move.y, aiColor());
+        if (placed) updateStatus();
+      }
+      if (!gameOver) maybeAIMove();
+    }, 180);
+  }
+
+  function computeAIMove(color){
+    for (const {x,y} of emptyCells()) { if (tryWin(x,y,color)) return {x,y}; }
+    const opp = 3 - color;
+    for (const {x,y} of emptyCells()) { if (tryWin(x,y,opp)) return {x,y}; }
+    let best = null, bestScore = -Infinity;
+    for (const {x,y} of emptyCells()){
+      const s = scoreMove(x,y,color) + centerBias(x,y);
+      if (s > bestScore){ bestScore = s; best = {x,y}; }
+    }
+    return best || emptyCells()[0] || null;
+  }
+
+  function emptyCells(){
+    const res=[];
+    for(let y=0;y<SIZE;y++) for(let x=0;x<SIZE;x++) if(board[y][x]===0) res.push({x,y});
+    const mid = (SIZE-1)/2;
+    res.sort((a,b)=> (Math.abs(a.x-mid)+Math.abs(a.y-mid)) - (Math.abs(b.x-mid)+Math.abs(b.y-mid)));
+    return res;
+  }
+
+  function tryWin(x,y,color){ board[y][x] = color; const ok = checkWin(x,y,color); board[y][x] = 0; return ok; }
+  function lineCount(x,y,dx,dy,color){
+    let count=1, i=1;
+    while(inside(x+i*dx,y+i*dy) && board[y+i*dy][x+i*dx]===color){count++; i++;}
+    i=1;
+    while(inside(x-i*dx,y-i*dy) && board[y-i*dy][x-i*dx]===color){count++; i++;}
+    return count;
+  }
+  function scoreMove(x,y,color){
+    const opp = 3 - color; let s = 0;
+    const dirs = [ [1,0],[0,1],[1,1],[1,-1] ];
+    for (const [dx,dy] of dirs){
+      const mine = lineCount(x,y,dx,dy,color);
+      const his  = lineCount(x,y,dx,dy,opp);
+      s += weight(mine) + 0.8*weight(his);
+    }
+    return s;
+  }
+  function weight(n){ if (n>=5) return 10000; if (n===4) return 500; if (n===3) return 80; if (n===2) return 12; return 1; }
+  function centerBias(x,y){ const c=(SIZE-1)/2; const d=Math.hypot(x-c,y-c); return 20 - d; }
+
+  // ---------- 联机 Socket 逻辑 ----------
+  function initSocket(){
+    if (socket) socket.disconnect();
+    socket = io(SERVER_URL, { transports: ['websocket'] });
+
+    socket.on('connect', () => {
+      console.log('Socket 已连接', socket.id);
+    });
+
+    socket.on('room-created', ({ roomId, playerColor }) => {
+      currentRoom = roomId;
+      myColor = playerColor; // 'black' 或 'white'
+      isMyTurn = (myColor === 'black');
+      onlineGameStarted = false;
+      roomInfo.textContent = `房间 ${roomId} (你是${myColor==='black'?'黑':'白'}) 等待对手...`;
+      leaveRoomBtn.style.display = 'inline-block';
+      updateStatus();
+    });
+
+    socket.on('player-color', (color) => {
+      myColor = color;
+      isMyTurn = false; // 后加入者后手
+      roomInfo.textContent = `房间 ${currentRoom} (你是${color==='black'?'黑':'白'}) 游戏开始！`;
+    });
+
+    socket.on('game-start', ({ black, white, currentTurn }) => {
+      onlineGameStarted = true;
+      opponentLeft = false;
+      // 重置棋盘
+      board = create2D(SIZE, SIZE, 0);
+      turn = 1;  // 黑先
+      gameOver = false;
+      history.length = 0;
+      lastMove = null;
+      // 根据当前回合和我的颜色判断是否轮到我
+      isMyTurn = (currentTurn === myColor);
+      updateStatus();
+      drawBoard();
+      setStatus(`游戏开始！${isMyTurn?'轮到你':'等待对手'}`);
+    });
+
+    socket.on('opponent-move', ({ row, col, color }) => {
+      // 对手落子
+      const colorVal = color === 'black' ? 1 : 2;
+      placeStone(col, row, colorVal);  // 注意坐标顺序
+      // 切换回合：现在轮到我了
+      isMyTurn = true;
+      updateStatus();
+    });
+
+    socket.on('opponent-left', () => {
+      opponentLeft = true;
+      onlineGameStarted = false;
+      setStatus('对手已离开房间');
+      roomInfo.textContent = `房间 ${currentRoom} - 对手已离开`;
+    });
+
+    socket.on('restart-game', () => {
+      // 对方请求重赛，服务器通知双方重置
+      board = create2D(SIZE, SIZE, 0);
+      turn = 1;
+      gameOver = false;
+      history.length = 0;
+      lastMove = null;
+      isMyTurn = (myColor === 'black');
+      updateStatus();
+      drawBoard();
+    });
+
+    socket.on('error', (msg) => {
+      alert('联机错误: ' + msg);
+    });
+
+    socket.on('disconnect', () => {
+      console.log('Socket 断开');
+      if (onlineModeEl.checked) setStatus('连接断开');
+    });
+  }
+
+  function leaveRoom(){
+    if (currentRoom) {
+      socket.emit('leave-room', { roomId: currentRoom });
+    }
+    currentRoom = null;
+    myColor = null;
+    onlineGameStarted = false;
+    roomInfo.textContent = '';
+    leaveRoomBtn.style.display = 'none';
+    updateStatus();
+    drawBoard();
+  }
+
+  // ---------- UI 事件绑定 ----------
+  function toggleOnlineMode(online){
+    if (online) {
+      // 切换到联机模式
+      modeBadge.textContent = '🌐 联机';
+      aiOptionsDiv.style.display = 'none';
+      roomPanel.style.display = 'flex';
+      undoBtn.disabled = true;
+      // 初始化 socket
+      if (!socket) initSocket();
+      else if (!socket.connected) socket.connect();
+      // 重置游戏状态
+      restart();
+      setStatus('请创建或加入房间');
+    } else {
+      // 切换回单机/人机
+      modeBadge.textContent = '🤖 人机';
+      aiOptionsDiv.style.display = 'flex';
+      roomPanel.style.display = 'none';
+      undoBtn.disabled = false;
+      if (currentRoom) leaveRoom();
+      restart();
+    }
+  }
+
+  onlineModeEl.addEventListener('change', (e) => {
+    toggleOnlineMode(e.target.checked);
+  });
+
+  createRoomBtn.addEventListener('click', () => {
+    const roomId = roomIdInput.value.trim() || Math.random().toString(36).substring(2, 8);
+    socket.emit('create-room', roomId);
+    roomIdInput.value = roomId;
+  });
+
+  joinRoomBtn.addEventListener('click', () => {
+    const roomId = roomIdInput.value.trim();
+    if (!roomId) { alert('请输入房间号'); return; }
+    socket.emit('join-room', roomId);
+    currentRoom = roomId;
+  });
+
+  leaveRoomBtn.addEventListener('click', leaveRoom);
+
+  // 棋盘交互
+  function handleStart(e) {
+    e.preventDefault();
+    const cell = eventToCell(e);
+    hover = cell;
+    drawBoard();
+  }
+  function handleMove(e) {
+    e.preventDefault();
+    const cell = eventToCell(e);
+    hover = cell;
+    drawBoard();
+  }
+  function handleEnd(e) {
+    e.preventDefault();
+    if (hover) {
+      handlePlace(hover.x, hover.y);
+    }
+    hover = null;
+    drawBoard();
+  }
+
+  canvas.addEventListener('mousedown', handleStart);
+  canvas.addEventListener('mousemove', handleMove);
+  canvas.addEventListener('mouseup', handleEnd);
+  canvas.addEventListener('mouseleave', () => { hover = null; drawBoard(); });
+
+  canvas.addEventListener('touchstart', handleStart, {passive: false});
+  canvas.addEventListener('touchmove', handleMove, {passive: false});
+  canvas.addEventListener('touchend', handleEnd, {passive: false});
+  canvas.addEventListener('touchcancel', () => { hover = null; drawBoard(); }, {passive: false});
+
+  undoBtn.addEventListener('click', undo);
+  restartBtn.addEventListener('click', restart);
+  showCoordsEl.addEventListener('change', drawBoard);
+  aiEnabledEl.addEventListener('change', () => { aiThinking = false; maybeAIMove(); });
+  aiColorSel.addEventListener('change', () => { if (!onlineModeEl.checked) restart(); });
+
+  // 初始化
+  updateStatus();
+  requestAnimationFrame(() => {
+    const rect = canvas.getBoundingClientRect();
+    canvas.style.height = rect.width + 'px';
+    drawBoard();
+    if (aiEnabledEl.checked) maybeAIMove();
+  });
+
+  // 窗口大小变化时保持画布比例
+  window.addEventListener('resize', () => {
+    const rect = canvas.getBoundingClientRect();
+    canvas.style.height = rect.width + 'px';
+    drawBoard();
+  });
+
+})();
+</script>
+</body>
+</html>
